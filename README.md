@@ -4,7 +4,6 @@ A robust Python solution for aligning images taken from the same location over t
 
 ![Python](https://img.shields.io/badge/python-v3.7+-blue.svg)
 ![OpenCV](https://img.shields.io/badge/OpenCV-v4.0+-green.svg)
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 ## ✨ Features
 
