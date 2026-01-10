@@ -1,9 +1,10 @@
 # 📸 Advanced Image Alignment for Timelapse Creation
 
-A robust Python solution for aligning images taken from the same location over time to create smooth, professional-quality timelapse videos. This tool handles camera shake, slight position changes, and lighting variations while preserving original colors.
-
 ![Python](https://img.shields.io/badge/python-v3.7+-blue.svg)
 ![OpenCV](https://img.shields.io/badge/OpenCV-v4.0+-green.svg)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-yellow?logo=buy-me-a-coffee)](https://buymeacoffee.com/lucascosta74)
+
+A robust Python solution for aligning images taken from the same location over time to create smooth, professional-quality timelapse videos. This tool handles camera shake, slight position changes, and lighting variations while preserving original colors.
 
 ## ✨ Features
 
@@ -157,3 +158,4 @@ ffmpeg -framerate 10 -pattern_type glob -i "aligned/your_folder/*.jpg" \
 - OpenCV team for excellent computer vision library
 - ORB algorithm developers for robust feature detection
 - Community contributors for feedback and improvements
+
