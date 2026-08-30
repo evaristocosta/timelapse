@@ -1,9 +1,9 @@
 import argparse
 import cv2
 import numpy as np
-import os
 import re
 from datetime import datetime
+from pathlib import Path
 from tqdm import tqdm
 
 """
@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "--min-matches",
         type=int,
-        default=20,
+        default=100,
         help="Minimum good feature matches required before aligning a frame.",
     )
     parser.add_argument(
@@ -56,16 +56,14 @@ def parse_args():
         help="Discard images whose capture time is more than N minutes from the folder mean capture time. Use 0 to disable filtering.",
     )
     parser.add_argument(
-        "--start-index",
-        type=int,
+        "--start-file",
         default=None,
-        help="0-based first image index to process within each subfolder.",
+        help="Exact filename to use as the first image to process within each folder.",
     )
     parser.add_argument(
-        "--end-index",
-        type=int,
+        "--end-file",
         default=None,
-        help="0-based last image index to process within each subfolder, inclusive.",
+        help="Exact filename to use as the last image to process within each folder, inclusive.",
     )
     parser.add_argument(
         "--reference-index",
@@ -78,11 +76,31 @@ def parse_args():
         default=None,
         help="Exact filename to use as the stable reference frame instead of the first image.",
     )
+    brightness_group = parser.add_mutually_exclusive_group()
+    brightness_group.add_argument(
+        "--brightness-normalization",
+        dest="brightness_normalization",
+        action="store_true",
+        default=True,
+        help="Normalize each frame to a standard brightness before alignment and saving (default).",
+    )
+    brightness_group.add_argument(
+        "--no-brightness-normalization",
+        dest="brightness_normalization",
+        action="store_false",
+        help="Disable automatic brightness normalization.",
+    )
+    parser.add_argument(
+        "--brightness-target",
+        type=float,
+        default=140.0,
+        help="Target average brightness (0-255) used when brightness normalization is enabled.",
+    )
     return parser.parse_args()
 
 
 def parse_capture_datetime(filename):
-    match = re.search(r"(\d{8}_\d{6})", filename)
+    match = re.search(r"(\d{8}_\d{6})", str(filename))
     if not match:
         return None
     return datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
@@ -123,6 +141,23 @@ def apply_zoom(image, zoom_factor):
     return zoomed
 
 
+def normalize_brightness(image, target_brightness):
+    """Adjust the image so its average luminance approaches the target value."""
+    lab_image = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab_image)
+
+    current_brightness = float(l_channel.mean())
+    if current_brightness <= 0:
+        return image
+
+    scale = target_brightness / current_brightness
+    scale = float(np.clip(scale, 0.5, 3.0))
+
+    adjusted_l = np.clip(l_channel.astype(np.float32) * scale, 0, 255).astype(np.uint8)
+    normalized_lab = cv2.merge((adjusted_l, a_channel, b_channel))
+    return cv2.cvtColor(normalized_lab, cv2.COLOR_LAB2BGR)
+
+
 def main():
     args = parse_args()
 
@@ -130,13 +165,10 @@ def main():
         raise ValueError("--keyframe-interval must be at least 1.")
     if args.time_window_minutes < 0:
         raise ValueError("--time-window-minutes must be >= 0.")
-    if args.start_index is not None and args.start_index < 0:
-        raise ValueError("--start-index must be >= 0.")
-    if args.end_index is not None and args.end_index < 0:
-        raise ValueError("--end-index must be >= 0.")
-    if args.start_index is not None and args.end_index is not None:
-        if args.start_index > args.end_index:
-            raise ValueError("--start-index must be less than or equal to --end-index.")
+    if args.start_file is not None and not args.start_file.strip():
+        raise ValueError("--start-file cannot be empty.")
+    if args.end_file is not None and not args.end_file.strip():
+        raise ValueError("--end-file cannot be empty.")
 
     input_dir = args.input_dir
     output_dir = args.output_dir
@@ -145,10 +177,12 @@ def main():
     min_matches = args.min_matches
     keyframe_interval = args.keyframe_interval
     time_window_minutes = args.time_window_minutes
-    start_index = args.start_index
-    end_index = args.end_index
+    start_file = args.start_file
+    end_file = args.end_file
     reference_index = args.reference_index
     reference_file = args.reference_file
+    brightness_normalization = args.brightness_normalization
+    brightness_target = args.brightness_target
 
     print("✅ Libraries imported and configuration set!")
     print(f"📁 Input directory: {input_dir}")
@@ -161,59 +195,87 @@ def main():
         if time_window_minutes > 0
         else "🕒 Time window: disabled"
     )
-    if start_index is not None or end_index is not None:
+    if start_file is not None or end_file is not None:
         print(
-            f"📏 Processing range: {start_index if start_index is not None else 0} to {end_index if end_index is not None else 'end'}"
+            f"📏 Processing range: {start_file if start_file is not None else 'start'} to {end_file if end_file is not None else 'end'}"
         )
     if reference_file is not None:
         print(f"📷 Reference file: {reference_file}")
     elif reference_index is not None:
         print(f"📷 Reference index: {reference_index}")
-
-    # 📁 Create output directory structure
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        print(f"✅ Created output directory: {output_dir}")
+    if brightness_normalization:
+        print(f"💡 Brightness normalization: enabled (target {brightness_target:.1f})")
     else:
-        print(f"📁 Output directory already exists: {output_dir}")
+        print("💡 Brightness normalization: disabled")
+    # 📁 Create output directory structure
+    input_dir_path = Path(input_dir)
+    output_dir_path = Path(output_dir)
+
+    if not output_dir_path.exists():
+        output_dir_path.mkdir(parents=True)
+        print(f"✅ Created output directory: {output_dir_path}")
+    else:
+        print(f"📁 Output directory already exists: {output_dir_path}")
 
     # 🔍 Discover subfolders in images directory
     try:
-        subfolders = [
-            f
-            for f in os.listdir(input_dir)
-            if os.path.isdir(os.path.join(input_dir, f))
+        subfolders = [p for p in input_dir_path.iterdir() if p.is_dir()]
+        root_image_files = [
+            p
+            for p in input_dir_path.iterdir()
+            if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
         ]
-        print(f"📂 Found {len(subfolders)} subfolders: {subfolders}")
+        if subfolders:
+            print(
+                f"📂 Found {len(subfolders)} subfolders: {[p.name for p in subfolders]}"
+            )
+            folder_specs = [
+                (
+                    f.name,
+                    f,
+                    output_dir_path / f.name,
+                )
+                for f in subfolders
+            ]
+        elif root_image_files:
+            print(
+                f"📂 No subfolders found, but {len(root_image_files)} image file(s) exist at the input root; processing as a single folder."
+            )
+            folder_specs = [
+                (
+                    input_dir_path.name or "images",
+                    input_dir_path,
+                    output_dir_path,
+                )
+            ]
+        else:
+            print(f"📂 Found 0 subfolders and no root-level images in {input_dir}")
+            folder_specs = []
     except FileNotFoundError:
         print(f"❌ Error: '{input_dir}' directory not found!")
-        subfolders = []
+        folder_specs = []
 
     # 🚀 Main Processing Loop
     total_processed = 0
     total_skipped = 0
 
-    for subfolder in subfolders:
+    for subfolder, input_folder_path, output_folder_path in folder_specs:
         print(f"\n{'='*50}")
         print(f"📂 Processing folder: {subfolder}")
         print(f"{'='*50}")
 
-        # 📁 Setup folder paths
-        input_folder_path = os.path.join(input_dir, subfolder)
-        output_folder_path = os.path.join(output_dir, subfolder)
-
         # 📁 Create output subfolder if needed
-        if not os.path.exists(output_folder_path):
-            os.makedirs(output_folder_path)
+        if not output_folder_path.exists():
+            output_folder_path.mkdir(parents=True)
             print(f"✅ Created output subfolder: {output_folder_path}")
         else:
             print(f"📁 Output subfolder exists: {output_folder_path}")
 
         # 🖼️ Discover image files
         image_files = [
-            f
-            for f in os.listdir(input_folder_path)
-            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+            p
+            for p in input_folder_path.iterdir()
+            if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
         ]
 
         if not image_files:
@@ -223,23 +285,28 @@ def main():
         # 📋 Sort files for consistent processing order
         image_files.sort()
 
-        if start_index is not None:
-            start_index_clamped = max(0, min(start_index, len(image_files) - 1))
-        else:
-            start_index_clamped = 0
+        start_index = 0
+        end_index = len(image_files) - 1
 
-        if end_index is not None:
-            end_index_clamped = max(
-                start_index_clamped, min(end_index, len(image_files) - 1)
-            )
-        else:
-            end_index_clamped = len(image_files) - 1
+        if start_file is not None:
+            start_matches = [p for p in image_files if p.name == start_file]
+            if not start_matches:
+                print(f"⚠️ Start file '{start_file}' was not found in {subfolder}.")
+                continue
+            start_index = image_files.index(start_matches[0])
 
-        if start_index_clamped > end_index_clamped:
-            print(f"⚠️ No images to process in {subfolder} with the selected range.")
+        if end_file is not None:
+            end_matches = [p for p in image_files if p.name == end_file]
+            if not end_matches:
+                print(f"⚠️ End file '{end_file}' was not found in {subfolder}.")
+                continue
+            end_index = image_files.index(end_matches[0])
+
+        if start_index > end_index:
+            print(f"⚠️ Start file comes after end file in {subfolder}.")
             continue
 
-        selected_files = image_files[start_index_clamped : end_index_clamped + 1]
+        selected_files = image_files[start_index : end_index + 1]
         print(f"🔢 Found {len(selected_files)} images in the selected range")
 
         if time_window_minutes > 0:
@@ -291,35 +358,41 @@ def main():
             print(f"🔢 Kept {len(selected_files)} images after time filtering")
 
         if reference_file is not None:
-            if reference_file not in selected_files:
+            reference_matches = [p for p in selected_files if p.name == reference_file]
+            if not reference_matches:
                 print(
                     f"⚠️ Reference file '{reference_file}' is not within the selected range for {subfolder}."
                 )
                 continue
-            keyframe_filename = reference_file
-            keyframe_index = selected_files.index(keyframe_filename)
+            keyframe_file = reference_matches[0]
+            keyframe_index = selected_files.index(keyframe_file)
         elif reference_index is not None:
             if reference_index < 0 or reference_index >= len(selected_files):
                 print(
                     f"⚠️ Reference index {reference_index} is out of range for {subfolder} (0..{len(selected_files)-1})."
                 )
                 continue
-            keyframe_filename = selected_files[reference_index]
+            keyframe_file = selected_files[reference_index]
             keyframe_index = reference_index
         else:
-            keyframe_filename = selected_files[0]
+            keyframe_file = selected_files[0]
             keyframe_index = 0
 
         # 📷 Load stable keyframe image
-        keyframe_image_path = os.path.join(input_folder_path, keyframe_filename)
-        keyframe_img_color = cv2.imread(keyframe_image_path)
+        keyframe_image_path = keyframe_file
+        keyframe_img_color = cv2.imread(str(keyframe_image_path))
 
         if keyframe_img_color is None:
             print(f"❌ Could not read keyframe image: {keyframe_image_path}")
             continue
 
+        if brightness_normalization:
+            keyframe_img_color = normalize_brightness(
+                keyframe_img_color, brightness_target
+            )
+
         keyframe_img_gray = cv2.cvtColor(keyframe_img_color, cv2.COLOR_BGR2GRAY)
-        print(f"📸 Keyframe image: {keyframe_filename}")
+        print(f"📸 Keyframe image: {keyframe_file.name}")
         print(
             f"📐 Image dimensions: {keyframe_img_color.shape[1]}x{keyframe_img_color.shape[0]}"
         )
@@ -349,23 +422,26 @@ def main():
         for index, filename in enumerate(
             tqdm(selected_files, desc=f"Aligning {subfolder}", unit="img")
         ):
-            input_image_path = os.path.join(input_folder_path, filename)
-            output_image_path = os.path.join(output_folder_path, filename)
+            input_image_path = filename
+            output_image_path = output_folder_path / filename.name
 
             # 📖 Read current image
-            img_color = cv2.imread(input_image_path)
+            img_color = cv2.imread(str(input_image_path))
 
             if img_color is None:
-                print(f"⚠️ Could not read {filename}, skipping...")
+                print(f"⚠️ Could not read {filename.name}, skipping...")
                 folder_skipped += 1
                 continue
+
+            if brightness_normalization:
+                img_color = normalize_brightness(img_color, brightness_target)
 
             img_gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
 
             # 📷 Handle keyframe image (no alignment needed)
-            if filename == keyframe_filename:
+            if filename == keyframe_file:
                 zoomed_aligned = apply_zoom(img_color, zoom_factor)
-                cv2.imwrite(output_image_path, zoomed_aligned)
+                cv2.imwrite(str(output_image_path), zoomed_aligned)
                 folder_processed += 1
                 continue
 
@@ -376,7 +452,7 @@ def main():
                 current_ref_kp = keyframe_kp
                 current_ref_des = keyframe_des
                 print(
-                    f"🔁 Resetting reference to keyframe before processing {filename}"
+                    f"🔁 Resetting reference to keyframe before processing {filename.name}"
                 )
 
             # 🔍 Detect features in current image
@@ -384,7 +460,7 @@ def main():
 
             if des2 is None or len(kp2) < min_matches:
                 print(
-                    f"⚠️ Not enough features in {filename} ({len(kp2) if kp2 else 0} < {min_matches})"
+                    f"⚠️ Not enough features in {filename.name} ({len(kp2) if kp2 else 0} < {min_matches})"
                 )
                 folder_skipped += 1
                 continue
@@ -395,7 +471,7 @@ def main():
 
             if len(matches) < min_matches:
                 print(
-                    f"⚠️ Not enough matches for {filename} ({len(matches)} < {min_matches})"
+                    f"⚠️ Not enough matches for {filename.name} ({len(matches)} < {min_matches})"
                 )
                 folder_skipped += 1
                 continue
@@ -425,7 +501,7 @@ def main():
                 )
 
                 if M is None:
-                    print(f"⚠️ Could not estimate transformation for {filename}")
+                    print(f"⚠️ Could not estimate transformation for {filename.name}")
                     folder_skipped += 1
                     continue
 
@@ -440,7 +516,7 @@ def main():
                 zoomed_aligned = apply_zoom(aligned, zoom_factor)
 
                 # 💾 Save aligned image
-                cv2.imwrite(output_image_path, zoomed_aligned)
+                cv2.imwrite(str(output_image_path), zoomed_aligned)
                 folder_processed += 1
 
                 # 🔄 Use the aligned result as the local reference for the next frame
@@ -456,106 +532,11 @@ def main():
                     current_ref_kp = keyframe_kp
                     current_ref_des = keyframe_des
                     print(
-                        f"⚠️ Local reference lost detail after {filename}; reverting to keyframe"
+                        f"⚠️ Local reference lost detail after {filename.name}; reverting to keyframe"
                     )
 
             except Exception as e:
-                print(f"❌ Error processing {filename}: {e}")
-                folder_skipped += 1
-                continue
-
-            # 🔁 Reset to the original keyframe every N images to limit drift
-            if index % keyframe_interval == 0:
-                current_ref_color = keyframe_img_color
-                current_ref_gray = keyframe_img_gray
-                current_ref_kp = keyframe_kp
-                current_ref_des = keyframe_des
-                print(
-                    f"🔁 Resetting reference to keyframe before processing {filename}"
-                )
-
-            # 🔍 Detect features in current image
-            kp2, des2 = orb.detectAndCompute(img_gray, None)
-
-            if des2 is None or len(kp2) < min_matches:
-                print(
-                    f"⚠️ Not enough features in {filename} ({len(kp2) if kp2 else 0} < {min_matches})"
-                )
-                folder_skipped += 1
-                continue
-
-            # 🎯 Match features between the active reference and current image
-            matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-            matches = matcher.match(current_ref_des, des2)
-
-            if len(matches) < min_matches:
-                print(
-                    f"⚠️ Not enough matches for {filename} ({len(matches)} < {min_matches})"
-                )
-                folder_skipped += 1
-                continue
-
-            # 📊 Select best matches for transformation
-            matches = sorted(matches, key=lambda x: x.distance)
-            num_matches = max(20, min(len(matches), int(len(matches) * 0.3)))
-            good_matches = matches[:num_matches]
-
-            # 📐 Extract matched point coordinates
-            src_pts = np.float32(
-                [current_ref_kp[m.queryIdx].pt for m in good_matches]
-            ).reshape(-1, 1, 2)
-            dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(
-                -1, 1, 2
-            )
-
-            # 🎯 Calculate robust transformation using RANSAC
-            try:
-                M, mask = cv2.estimateAffinePartial2D(
-                    dst_pts,
-                    src_pts,
-                    method=cv2.RANSAC,
-                    ransacReprojThreshold=3.0,
-                    maxIters=2000,
-                    confidence=0.99,
-                )
-
-                if M is None:
-                    print(f"⚠️ Could not estimate transformation for {filename}")
-                    folder_skipped += 1
-                    continue
-
-                # 🎨 Apply transformation to preserve colors
-                aligned = cv2.warpAffine(
-                    img_color,
-                    M,
-                    (current_ref_color.shape[1], current_ref_color.shape[0]),
-                )
-
-                # ✂️ Apply zoom to reduce black borders
-                zoomed_aligned = apply_zoom(aligned, zoom_factor)
-
-                # 💾 Save aligned image
-                cv2.imwrite(output_image_path, zoomed_aligned)
-                folder_processed += 1
-
-                # 🔄 Use the aligned result as the local reference for the next frame
-                current_ref_color = aligned
-                current_ref_gray = cv2.cvtColor(current_ref_color, cv2.COLOR_BGR2GRAY)
-                current_ref_kp, current_ref_des = orb.detectAndCompute(
-                    current_ref_gray, None
-                )
-
-                if current_ref_des is None or len(current_ref_kp) < min_matches:
-                    current_ref_color = keyframe_img_color
-                    current_ref_gray = keyframe_img_gray
-                    current_ref_kp = keyframe_kp
-                    current_ref_des = keyframe_des
-                    print(
-                        f"⚠️ Local reference lost detail after {filename}; reverting to keyframe"
-                    )
-
-            except Exception as e:
-                print(f"❌ Error processing {filename}: {e}")
+                print(f"❌ Error processing {filename.name}: {e}")
                 folder_skipped += 1
                 continue
 
