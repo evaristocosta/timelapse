@@ -198,3 +198,4 @@ pyrightconfig.json
 # Personal additions
 images/*
 aligned/*
+.venv/
