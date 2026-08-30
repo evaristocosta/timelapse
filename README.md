@@ -108,6 +108,22 @@ Once the images are aligned, you can create a timelapse from the output folder w
 ffmpeg -framerate 30 -pattern_type glob -i "aligned/your_folder/*.jpg" -c:v libx264 -pix_fmt yuv420p timelapse.mp4
 ```
 
+If you want a Python-only option, use the bundled renderer inside the existing `timelapse` conda environment:
+
+```powershell
+conda run -n timelapse python .\render_timelapse.py .\aligned\AP --output-file .\timelapse_AP.mp4 --fps 15 --fill-date-gaps --save-gap-frames
+```
+
+Useful options:
+
+- `--fps 15`: slower playback that works well for long timelapses.
+- `--fill-date-gaps`: bridges missing calendar days by holding the previous photo and fading through black.
+- `--save-gap-frames`: writes the generated bridge frames to a sibling `*_gap_frames` folder so they can be reused in another editor.
+- `--gap-frames-dir <path>`: choose a custom folder for the saved bridge frames.
+- `--output-file <path>`: choose the final video file name and location.
+
+If your aligned images live in a different folder, replace `./aligned/AP` with that folder path.
+
 ## ✅ Notebook
 
 The notebook in the project root is kept in sync with the script logic for interactive experimentation and parameter tuning. The script is the recommended option for repeatable batch processing.
