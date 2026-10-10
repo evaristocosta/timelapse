@@ -15,17 +15,20 @@ A robust Python solution for aligning images taken from the same location over t
 
 ### Prerequisites
 
-Use the project environment or install the required dependencies:
+This project uses uv to manage the Python environment and dependencies.
 
 ```bash
-pip install opencv-python numpy tqdm
+# Install uv if you do not already have it
+pip install uv
+
+# Create the environment and install the project dependencies
+uv sync
 ```
 
-If you are using Conda, this is the recommended workflow:
+Run the alignment script from the project root:
 
 ```powershell
-conda activate timelapse
-python .\timelapse.py --input-dir .\images --output-dir .\aligned --zoom-factor 1.15 --max-features 5000 --min-matches 20 --keyframe-interval 10 --time-window-minutes 45
+uv run python .\timelapse.py --input-dir .\images --output-dir .\aligned --zoom-factor 1.15 --max-features 5000 --min-matches 100 --keyframe-interval 10 --time-window-minutes 45
 ```
 
 ### Folder Structure
@@ -44,15 +47,14 @@ images/
 ### Script Usage
 
 ```powershell
-conda activate timelapse
-python .\timelapse.py --input-dir .\images --output-dir .\aligned
+uv run python .\timelapse.py --input-dir .\images --output-dir .\aligned
 ```
 
 Useful examples:
 
 ```powershell
-python .\timelapse.py --input-dir .\images --output-dir .\aligned --start-index 120 --end-index 220 --reference-index 10 --time-window-minutes 45
-python .\timelapse.py --input-dir .\images --output-dir .\aligned --start-index 120 --end-index 220 --reference-file IMG_0542.jpg --time-window-minutes 45
+uv run python .\timelapse.py --input-dir .\images --output-dir .\aligned --start-index 120 --end-index 220 --reference-index 10 --time-window-minutes 45
+uv run python .\timelapse.py --input-dir .\images --output-dir .\aligned --start-index 120 --end-index 220 --reference-file IMG_0542.jpg --time-window-minutes 45
 ```
 
 ## 📋 Configuration Options
@@ -63,7 +65,7 @@ python .\timelapse.py --input-dir .\images --output-dir .\aligned --start-index 
 | `--output-dir`          | `aligned` | Folder where aligned images are saved                          |
 | `--zoom-factor`         | `1.15`    | Zoom factor applied after alignment                            |
 | `--max-features`        | `5000`    | ORB feature count                                              |
-| `--min-matches`         | `20`      | Minimum good matches required                                  |
+| `--min-matches`         | `100`     | Minimum good matches required                                  |
 | `--keyframe-interval`   | `10`      | Reset to the stable keyframe every N images                    |
 | `--time-window-minutes` | `45`      | Filter out captures farther than ±N minutes from the mean time |
 | `--start-index`         | `None`    | First index to process within each folder                      |
@@ -93,6 +95,42 @@ This works much better than keeping a single static reference throughout a very 
 
 ## 🐛 Troubleshooting
 
+## 🔬 ORB and Matching — Quick Explanation
+
+- **ORB (Oriented FAST and Rotated BRIEF):** a fast, efficient feature detector + descriptor. ORB finds keypoints with FAST and describes them using a binary BRIEF-like descriptor that is rotation-aware. It is computationally inexpensive and works well for many timelapse scenes where features are reasonably stable.
+
+- **Matching:** the script uses a `BFMatcher` with Hamming distance (suitable for ORB's binary descriptors) and `crossCheck=True` so matches are mutual best matches. After matching, the code keeps the best subset of matches and uses RANSAC to robustly estimate an affine transform.
+
+- **What `--min-matches` means:** this parameter sets the minimum number of "good" matched keypoints required before the script will attempt to compute and accept an alignment for a frame. If either the detector or the matcher returns fewer than `--min-matches`, the frame is skipped to avoid producing unreliable warps.
+
+- **Tuning guidance:**
+  - The script default is conservative to avoid bad alignments (see the `timelapse.py` defaults).
+  - Typical ranges:
+    - High-quality, textured scenes: `min_matches = 20..50` — faster, more permissive.
+    - Challenging or low-feature scenes: `min_matches = 5..15` — accept weaker matches.
+    - Strict alignment (few false positives): `min_matches = 80..150` — safer but may skip many frames.
+
+Adjust `--max-features` and `--zoom-factor` together with `--min-matches` for best results: increasing `--max-features` gives the matcher more keypoints to work with; lowering `--min-matches` allows alignment in sparse scenes but increases the risk of bad transforms.
+
+## ⏱️ Keyframe Interval — When to Change
+
+- **What it does:** `--keyframe-interval` controls how often (in frames) the algorithm resets the active reference back to the stable keyframe. The pipeline tracks locally using the last successful aligned frame for continuity, but periodically reverting to the stable keyframe prevents slow drift accumulating across many frames.
+
+- **Trade-offs:**
+  - Lower values (e.g., `1..5`): the reference is reset frequently. This reduces drift and is safer when the scene changes quickly or when matches are noisy, but it can break local continuity and increase the chance of visible jumps.
+  - Higher values (e.g., `10..50`): the algorithm relies longer on local tracking, producing smoother motion when matches are reliable, but drift can accumulate over long sequences.
+
+- **When to lower the interval:**
+  - The scene has strong lighting changes or moving foreground objects.
+  - You see gradual misalignment over time (drift) in longer runs.
+  - Feature matching is marginal and the local reference often gets replaced due to insufficient keypoints.
+
+- **When to increase the interval:**
+  - Images are captured frequently and look nearly identical between frames (stable tripod, small motion).
+  - You want very smooth local motion and have plenty of reliable matches.
+
+- **Practical example:** start with the default (`10`) and inspect a short rendered timelapse. If drift appears after many frames, reduce the interval; if you observe small jittery jumps after resets, increase it.
+
 ### Common issues
 
 - Not enough features detected: increase `--max-features` or choose a sharper reference image.
@@ -108,17 +146,17 @@ Once the images are aligned, you can create a timelapse from the output folder w
 ffmpeg -framerate 30 -pattern_type glob -i "aligned/your_folder/*.jpg" -c:v libx264 -pix_fmt yuv420p timelapse.mp4
 ```
 
-If you want a Python-only option, use the bundled renderer inside the existing `timelapse` conda environment:
+If you want a Python-only option, use the bundled renderer through uv:
 
 ```powershell
-conda run -n timelapse python .\render_timelapse.py .\aligned\AP --output-file .\timelapse_AP.mp4 --fps 15 --fill-date-gaps --save-gap-frames
+uv run python .\render_timelapse.py .\aligned\AP --output-file .\timelapse_AP.mp4 --fps 15 --fill-date-gaps --save-gap-frames
 ```
 
 Useful options:
 
 - `--fps 15`: slower playback that works well for long timelapses.
-- `--fill-date-gaps`: bridges missing calendar days by holding the previous photo and fading through black.
-- `--save-gap-frames`: writes the generated bridge frames to a sibling `*_gap_frames` folder so they can be reused in another editor.
+- `--fill-date-gaps`: inserts exactly one synthetic frame for each missing calendar day, fading the last photo toward black with the fade strength normalized by the longest gap in the sequence.
+- `--save-gap-frames`: writes the generated frames to a sibling `*_gen` folder next to the source image sequence so they can be reused in another editor.
 - `--gap-frames-dir <path>`: choose a custom folder for the saved bridge frames.
 - `--output-file <path>`: choose the final video file name and location.
 

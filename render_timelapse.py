@@ -50,25 +50,7 @@ def parse_args():
     parser.add_argument(
         "--fill-date-gaps",
         action="store_true",
-        help="Insert hold-and-fade bridge segments when consecutive filenames skip calendar days.",
-    )
-    parser.add_argument(
-        "--gap-hold-seconds",
-        type=float,
-        default=0.75,
-        help="Seconds to keep the last photo visible per missing day before fading to black.",
-    )
-    parser.add_argument(
-        "--gap-fade-seconds",
-        type=float,
-        default=1.0,
-        help="Seconds used for each fade segment when bridging a missing-day gap.",
-    )
-    parser.add_argument(
-        "--gap-black-seconds",
-        type=float,
-        default=0.35,
-        help="Seconds to hold black per missing day between the fade-out and fade-in.",
+        help="Insert one synthetic frame per missing calendar day, fading the last photo toward black.",
     )
     parser.add_argument(
         "--save-gap-frames",
@@ -78,7 +60,7 @@ def parse_args():
     parser.add_argument(
         "--gap-frames-dir",
         default=None,
-        help="Directory to save generated gap frames. Defaults to a sibling *_gap_frames folder next to the output video.",
+        help="Directory to save generated gap frames. Defaults to a sibling *_gen folder next to the input image folder.",
     )
     return parser.parse_args()
 
@@ -104,6 +86,28 @@ def format_capture_label(capture_datetime):
     if capture_datetime is None:
         return "unknown"
     return capture_datetime.strftime("%Y%m%d_%H%M%S")
+
+
+def collect_gap_statistics(image_files):
+    gap_runs = []
+    max_missing_days = 0
+
+    if not image_files:
+        return gap_runs, max_missing_days
+
+    previous_datetime = parse_capture_datetime(image_files[0])
+
+    for image_file in image_files[1:]:
+        current_datetime = parse_capture_datetime(image_file)
+        if previous_datetime is not None and current_datetime is not None:
+            missing_days = (current_datetime.date() - previous_datetime.date()).days - 1
+            if missing_days > 0:
+                gap_runs.append((previous_datetime, current_datetime, missing_days))
+                max_missing_days = max(max_missing_days, missing_days)
+
+        previous_datetime = current_datetime
+
+    return gap_runs, max_missing_days
 
 
 def resize_if_needed(frame, size, allow_resize):
@@ -138,96 +142,40 @@ def write_hold(writer, frame, output_size, allow_resize, frame_count):
         write_frame(writer, frame, output_size, allow_resize)
 
 
-def write_fade(writer, start_frame, end_frame, output_size, allow_resize, frame_count):
-    if frame_count <= 0:
-        return
-
-    start_frame = resize_if_needed(start_frame, output_size, allow_resize)
-    end_frame = resize_if_needed(end_frame, output_size, allow_resize)
-
-    for index in range(1, frame_count + 1):
-        alpha = index / (frame_count + 1)
-        blended = cv2.addWeighted(start_frame, 1.0 - alpha, end_frame, alpha, 0.0)
-        writer.write(blended)
-
-
 def write_gap_bridge(
     writer,
     last_frame,
-    next_frame,
     output_size,
     allow_resize,
     missing_days,
-    fps,
-    gap_hold_seconds,
-    gap_fade_seconds,
-    gap_black_seconds,
+    gap_decay_step,
     save_gap_frames=False,
     gap_frames_dir=None,
     gap_frame_prefix=None,
 ):
-    hold_frames = max(0, int(round(gap_hold_seconds * missing_days * fps)))
-    fade_frames = max(1, int(round(gap_fade_seconds * fps)))
-    black_frames = max(0, int(round(gap_black_seconds * missing_days * fps)))
-
-    write_hold(writer, last_frame, output_size, allow_resize, hold_frames)
-
-    if save_gap_frames and gap_frames_dir is not None and gap_frame_prefix is not None:
-        for index in range(1, hold_frames + 1):
-            save_frame(
-                gap_frames_dir,
-                f"{gap_frame_prefix}_hold_{index:04d}.png",
-                last_frame,
-                output_size,
-                allow_resize,
-            )
-
     black_frame = np.zeros((output_size[1], output_size[0], 3), dtype=np.uint8)
-    if save_gap_frames and gap_frames_dir is not None and gap_frame_prefix is not None:
-        for index in range(1, fade_frames + 1):
-            alpha = index / (fade_frames + 1)
-            blended = cv2.addWeighted(last_frame, 1.0 - alpha, black_frame, alpha, 0.0)
+    for index in range(1, missing_days + 1):
+        alpha = min(0.5, index * gap_decay_step)
+        blended = cv2.addWeighted(last_frame, 1.0 - alpha, black_frame, alpha, 0.0)
+        writer.write(resize_if_needed(blended, output_size, allow_resize))
+
+        if (
+            save_gap_frames
+            and gap_frames_dir is not None
+            and gap_frame_prefix is not None
+        ):
             save_frame(
                 gap_frames_dir,
-                f"{gap_frame_prefix}_fadeout_{index:04d}.png",
+                f"{gap_frame_prefix}_gap_{index:04d}.png",
                 blended,
                 output_size,
                 allow_resize,
             )
-    write_fade(writer, last_frame, black_frame, output_size, allow_resize, fade_frames)
-
-    if save_gap_frames and gap_frames_dir is not None and gap_frame_prefix is not None:
-        for index in range(1, black_frames + 1):
-            save_frame(
-                gap_frames_dir,
-                f"{gap_frame_prefix}_black_{index:04d}.png",
-                black_frame,
-                output_size,
-                True,
-            )
-    write_hold(writer, black_frame, output_size, True, black_frames)
-
-    if save_gap_frames and gap_frames_dir is not None and gap_frame_prefix is not None:
-        for index in range(1, fade_frames + 1):
-            alpha = index / (fade_frames + 1)
-            blended = cv2.addWeighted(black_frame, 1.0 - alpha, next_frame, alpha, 0.0)
-            save_frame(
-                gap_frames_dir,
-                f"{gap_frame_prefix}_fadein_{index:04d}.png",
-                blended,
-                output_size,
-                allow_resize,
-            )
-    write_fade(writer, black_frame, next_frame, output_size, allow_resize, fade_frames)
 
 
 def estimate_output_frames(
     image_files,
     fill_date_gaps,
-    fps,
-    gap_hold_seconds,
-    gap_fade_seconds,
-    gap_black_seconds,
 ):
     if not image_files:
         return 0
@@ -245,11 +193,7 @@ def estimate_output_frames(
         ):
             missing_days = (current_datetime.date() - previous_datetime.date()).days - 1
             if missing_days > 0:
-                total_frames += (
-                    max(0, int(round(gap_hold_seconds * missing_days * fps)))
-                    + 2 * max(1, int(round(gap_fade_seconds * fps)))
-                    + max(0, int(round(gap_black_seconds * missing_days * fps)))
-                )
+                total_frames += missing_days
 
         total_frames += 1
         previous_datetime = current_datetime
@@ -282,13 +226,6 @@ def main():
     fps = float(args.fps)
     if fps <= 0:
         raise ValueError("FPS must be greater than 0.")
-
-    if args.gap_hold_seconds < 0:
-        raise ValueError("--gap-hold-seconds must be >= 0.")
-    if args.gap_fade_seconds <= 0:
-        raise ValueError("--gap-fade-seconds must be > 0.")
-    if args.gap_black_seconds < 0:
-        raise ValueError("--gap-black-seconds must be >= 0.")
     if (
         args.save_gap_frames
         and args.gap_frames_dir is not None
@@ -327,7 +264,7 @@ def main():
     log(f"🖼️ First readable frame: {first_frame_path.name}")
     if args.fill_date_gaps:
         log(
-            f"🕳️ Date gaps: enabled (hold {args.gap_hold_seconds:.2f}s/day, fade {args.gap_fade_seconds:.2f}s, black {args.gap_black_seconds:.2f}s/day)"
+            "🕳️ Date gaps: enabled (one synthetic frame per missing day, fading toward black)"
         )
     else:
         log("🕳️ Date gaps: disabled")
@@ -336,7 +273,7 @@ def main():
         gap_frames_dir = (
             Path(args.gap_frames_dir)
             if args.gap_frames_dir
-            else output_file.with_name(f"{output_file.stem}_gap_frames")
+            else input_dir.with_name(f"{input_dir.name}_gen")
         )
         gap_frames_dir.mkdir(parents=True, exist_ok=True)
         log(f"💾 Gap frames: saving to {gap_frames_dir}")
@@ -344,14 +281,14 @@ def main():
         gap_frames_dir = None
         log("💾 Gap frames: not saved")
 
-    estimated_frames = estimate_output_frames(
-        image_files,
-        args.fill_date_gaps,
-        fps,
-        args.gap_hold_seconds,
-        args.gap_fade_seconds,
-        args.gap_black_seconds,
-    )
+    _gap_runs, max_missing_days = collect_gap_statistics(image_files)
+    gap_decay_step = 0.0 if max_missing_days <= 0 else 0.5 / max_missing_days
+    if args.fill_date_gaps and max_missing_days > 0:
+        log(
+            f"🕳️ Gap fade scale: longest gap is {max_missing_days} day(s), step is {gap_decay_step * 100:.1f}% per day"
+        )
+
+    estimated_frames = estimate_output_frames(image_files, args.fill_date_gaps)
     log(f"📏 Estimated output frames: {estimated_frames}")
 
     previous_frame = first_frame
@@ -384,23 +321,15 @@ def main():
                 write_gap_bridge(
                     writer,
                     previous_frame,
-                    frame,
                     output_size,
                     args.resize_to_first_frame,
                     missing_days,
-                    fps,
-                    args.gap_hold_seconds,
-                    args.gap_fade_seconds,
-                    args.gap_black_seconds,
+                    gap_decay_step,
                     save_gap_frames=args.save_gap_frames,
                     gap_frames_dir=gap_frames_dir,
                     gap_frame_prefix=gap_label,
                 )
-                progress.update(
-                    int(round(args.gap_hold_seconds * missing_days * fps))
-                    + 2 * max(1, int(round(args.gap_fade_seconds * fps)))
-                    + int(round(args.gap_black_seconds * missing_days * fps))
-                )
+                progress.update(missing_days)
                 write_frame(writer, frame, output_size, args.resize_to_first_frame)
                 progress.update(1)
                 previous_frame = frame
