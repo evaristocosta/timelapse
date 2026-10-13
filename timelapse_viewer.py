@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
@@ -109,6 +109,27 @@ def get_day_records(
     ]
 
 
+def season_for_date(value: str | date | datetime) -> str:
+    if isinstance(value, str):
+        parsed_date = date.fromisoformat(value)
+    elif isinstance(value, datetime):
+        parsed_date = value.date()
+    else:
+        parsed_date = value
+
+    month = parsed_date.month
+    if month in (12, 1, 2):
+        season = "Winter"
+    elif month in (3, 4, 5):
+        season = "Spring"
+    elif month in (6, 7, 8):
+        season = "Summer"
+    else:
+        season = "Autumn"
+
+    return f"{season} {parsed_date.year}"
+
+
 @lru_cache(maxsize=128)
 def load_display_image(path: str | Path, max_size: int = 1400) -> Image.Image:
     path = str(path)
@@ -128,4 +149,5 @@ __all__ = [
     "get_day_records",
     "load_display_image",
     "parse_capture_datetime",
+    "season_for_date",
 ]
