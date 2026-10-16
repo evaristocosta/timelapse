@@ -203,7 +203,30 @@ def main() -> None:
     page = st.sidebar.radio("Page", ["Browse dates", "Compare dates"])
 
     root = Path(__file__).resolve().parent
-    source_dir = st.sidebar.selectbox("Image source", ["images", "aligned"], index=0)
+    available_sources = [
+        folder_name
+        for folder_name in (
+            "optimized_assets/images",
+            "optimized_assets/aligned",
+            "images",
+            "aligned",
+        )
+        if (root / folder_name).exists()
+    ]
+    if not available_sources:
+        st.error("No image source directories were found.")
+        st.stop()
+
+    default_source = (
+        "optimized_assets/images"
+        if "optimized_assets/images" in available_sources
+        else available_sources[0]
+    )
+    source_dir = st.sidebar.selectbox(
+        "Image source",
+        available_sources,
+        index=available_sources.index(default_source),
+    )
     source_path = root / source_dir
     if not source_path.exists():
         st.error(f"Selected source directory does not exist: {source_path}")

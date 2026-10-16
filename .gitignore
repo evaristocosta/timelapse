@@ -196,6 +196,8 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python,jupyternotebooks,opencv
 
 # Personal additions
-images/*
-aligned/*
+/images/
+/aligned/
+# keep the optimized web assets in the repo
+# optimized_assets/ is intentionally not ignored
 .venv/
